@@ -411,11 +411,11 @@ st.plotly_chart(fig_top10, use_container_width=True)
 
 st.markdown(f"""
 <div class="insight-box">
-    <strong>💡 Jawaban untuk Pertanyaan Riset 1:</strong><br>
-    Co-benefits terbesar terkonsentrasi di wilayah perkotaan besar seperti <strong>{top10.iloc[0]['local_authority']}</strong> 
-    (sekitar £{top10.iloc[0]['value']:.1f} juta), yaitu sekitar <strong>{top10.iloc[0]['Comparison to Avg']:.0f}%</strong> 
-    di atas rata-rata nasional. Namun, manfaat tersebar di seluruh {len(map_data)} otoritas lokal, 
-    yang menunjukkan adanya peluang kebijakan transportasi berkelanjutan di seluruh negeri.
+    <strong>💡 Answer to Research Question 1:</strong><br>
+    The largest co-benefits are concentrated in major urban areas such as <strong>{top10.iloc[0]['local_authority']}</strong> 
+    (around £{top10.iloc[0]['value']:.1f} million), which is approximately <strong>{top10.iloc[0]['Comparison to Avg']:.0f}%</strong> 
+    above the national average. However, benefits are spread across all {len(map_data)} local authorities, 
+    which shows opportunities for sustainable transport policies across the country.
 </div>
 """, unsafe_allow_html=True)
 
