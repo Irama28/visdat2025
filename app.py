@@ -4,6 +4,7 @@ import plotly.express as px
 import numpy as np
 import folium
 from streamlit_folium import st_folium
+import requests
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -14,6 +15,37 @@ st.set_page_config(
 )
 
 GEOJSON_URL = "https://raw.githubusercontent.com/martinjc/UK-GeoJSON/master/json/administrative/gb/lad.json"
+
+# --- CACHE GEOJSON DATA ---
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_geojson():
+    """Load and cache GeoJSON data to avoid repeated fetches"""
+    try:
+        response = requests.get(GEOJSON_URL, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error loading GeoJSON: {e}")
+        return None
+
+# --- CACHE MAP DATA AGGREGATION ---
+@st.cache_data
+def get_map_data(master_df, category_filter, selected_year):
+    """Cache map data aggregation to avoid recomputation on map interactions"""
+    if category_filter:
+        filtered_df = master_df[master_df['co-benefit_type'] == category_filter]
+    else:
+        filtered_df = master_df
+    
+    if selected_year == 2050:
+        map_data = filtered_df.groupby('local_authority')['sum'].sum().reset_index()
+        map_data.columns = ['local_authority', 'value']
+    else:
+        year_col = str(selected_year)
+        map_data = filtered_df.groupby('local_authority')[year_col].sum().reset_index()
+        map_data.columns = ['local_authority', 'value']
+    
+    return map_data
 
 # CSS for the landing page and dashboard (dark, modern & consistent theme)
 st.markdown("""
@@ -353,40 +385,86 @@ with col_map2:
     """, unsafe_allow_html=True)
 
 with col_map1:
-    # Filter data
-    if benefit_categories[selected_category]:
-        filtered_df = master_df[master_df['co-benefit_type'] == benefit_categories[selected_category]]
-    else:
-        filtered_df = master_df
+    # Initialize session state for map view persistence
+    if 'map_center' not in st.session_state:
+        st.session_state.map_center = [54.5, -2]
+        st.session_state.map_zoom = 5
+        st.session_state.last_filter = None
     
-    # Aggregate by local authority
-    if selected_year == 2050:
-        map_data = filtered_df.groupby('local_authority')['sum'].sum().reset_index()
-        map_data.columns = ['local_authority', 'value']
-    else:
-        year_col = str(selected_year)
-        map_data = filtered_df.groupby('local_authority')[year_col].sum().reset_index()
-        map_data.columns = ['local_authority', 'value']
+    # Check if filter has changed
+    current_filter = f"{selected_category}_{selected_year}"
+    filter_changed = st.session_state.last_filter != current_filter
+    
+    # Get cached map data aggregation (fast even on re-runs)
+    category_filter = benefit_categories[selected_category]
+    map_data = get_map_data(master_df, category_filter, selected_year)
     
     # Calculate national average for comparison
     national_avg = map_data['value'].mean()
     
-    try:
-        m_map = folium.Map(location=[54.5, -2], zoom_start=5, tiles="CartoDB dark_matter")
-        folium.Choropleth(
-            geo_data=GEOJSON_URL,
-            data=map_data,
-            columns=['local_authority', 'value'],
-            key_on="feature.properties.LAD13NM",
-            fill_color="YlGn",
-            fill_opacity=0.8,
-            line_opacity=0.2,
-            legend_name="Benefits (Million GBP)"
-        ).add_to(m_map)
-        st_folium(m_map, width=None, height=600)
-    except Exception as e:
-        st.warning(f"⚠️ The map could not be loaded. Showing the top 10 areas in a table instead. Details: {e}")
-        st.dataframe(map_data.nlargest(10, 'value'), use_container_width=True)
+    # Load cached GeoJSON data
+    geojson_data = load_geojson()
+    
+    if geojson_data is None:
+        st.warning("⚠️ GeoJSON data could not be loaded. Showing the top 10 areas in a table instead.")
+        st.dataframe(map_data.nlargest(10, 'value'), width='stretch')
+    else:
+        try:
+            # Get current map view state (preserved from previous interactions)
+            map_location = st.session_state.map_center
+            map_zoom = st.session_state.map_zoom
+            
+            # Create map with current view state
+            m_map = folium.Map(
+                location=map_location, 
+                zoom_start=map_zoom, 
+                tiles="CartoDB dark_matter"
+            )
+            
+            # Always add choropleth (data aggregation is cached, so it's fast)
+            # The choropleth will update when filter changes because map_data changes
+            folium.Choropleth(
+                geo_data=geojson_data,
+                data=map_data,  # This uses cached aggregation from get_map_data()
+                columns=['local_authority', 'value'],
+                key_on="feature.properties.LAD13NM",
+                fill_color="YlGn",
+                fill_opacity=0.8,
+                line_opacity=0.2,
+                legend_name="Benefits (Million GBP)"
+            ).add_to(m_map)
+            
+            # Use key based on filter to ensure choropleth updates when filter changes
+            # But preserve view state from session_state to maintain zoom/pan
+            # The data aggregation is cached, so recreating choropleth is fast
+            map_key = f"map_{current_filter}"
+            
+            map_return = st_folium(
+                m_map, 
+                width=None, 
+                height=600, 
+                key=map_key,  # Key changes with filter to ensure choropleth updates
+                returned_objects=["last_clicked", "bounds", "zoom", "center"]
+            )
+            
+            # Update session state with current map view state
+            # This preserves zoom/pan position
+            if map_return is not None:
+                if map_return.get('center') is not None:
+                    st.session_state.map_center = [
+                        map_return['center']['lat'],
+                        map_return['center']['lng']
+                    ]
+                if map_return.get('zoom') is not None:
+                    st.session_state.map_zoom = map_return['zoom']
+            
+            # Update filter state for tracking
+            if filter_changed:
+                st.session_state.last_filter = current_filter
+            
+        except Exception as e:
+            st.warning(f"⚠️ The map could not be loaded. Showing the top 10 areas in a table instead. Details: {e}")
+            st.dataframe(map_data.nlargest(10, 'value'), width='stretch')
 
 # Top 10 regions
 st.markdown("### 🏆 Top 10 Regions by Benefits")
@@ -407,7 +485,7 @@ fig_top10.update_layout(
     height=400,
     yaxis={'categoryorder': 'total ascending'}
 )
-st.plotly_chart(fig_top10, use_container_width=True)
+st.plotly_chart(fig_top10, width='stretch')
 
 st.markdown(f"""
 <div class="insight-box">
@@ -440,7 +518,7 @@ with col_pie:
     )
     fig_pie.update_traces(textposition='inside', textinfo='percent+label')
     fig_pie.update_layout(height=400)
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.plotly_chart(fig_pie, width='stretch')
 
 with col_bar:
     st.markdown("### Benefits by Category (£ Million)")
@@ -457,7 +535,7 @@ with col_bar:
     )
     fig_bar_cat.update_traces(texttemplate='£%{text:.0f}M', textposition='outside')
     fig_bar_cat.update_layout(showlegend=False, height=400)
-    st.plotly_chart(fig_bar_cat, use_container_width=True)
+    st.plotly_chart(fig_bar_cat, width='stretch')
 
 top_benefit = benefit_dist.nlargest(1, 'Nilai').iloc[0]
 st.markdown(f"""
@@ -497,7 +575,7 @@ fig_timeline.update_layout(
     hovermode='x unified',
     legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
 )
-st.plotly_chart(fig_timeline, use_container_width=True)
+st.plotly_chart(fig_timeline, width='stretch')
 
 # Growth calculation
 start_val = trend_df[trend_df['Year']==2025].iloc[0, 1:].sum()
@@ -556,7 +634,7 @@ fig_scatter = px.scatter(
 )
 fig_scatter.update_traces(marker=dict(size=8, opacity=0.7))
 fig_scatter.update_layout(height=500)
-st.plotly_chart(fig_scatter, use_container_width=True)
+st.plotly_chart(fig_scatter, width='stretch')
 
 st.markdown(f"""
 <div class="insight-box">
@@ -604,7 +682,7 @@ fig_compare = px.bar(
     color_discrete_sequence=['#22c55e', '#16a34a']
 )
 fig_compare.update_layout(height=400, legend=dict(title=''))
-st.plotly_chart(fig_compare, use_container_width=True)
+st.plotly_chart(fig_compare, width='stretch')
 
 # Comparison metrics
 city_a_total = comp_df[comp_df['local_authority']==city_a]['sum'].sum()
